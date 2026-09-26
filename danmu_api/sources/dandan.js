@@ -13,6 +13,7 @@ import BilibiliSource from "./bilibili.js";
 import YoukuSource from "./youku.js";
 import BahamutSource from "./bahamut.js";
 import { titleMatches, getExplicitSeasonNumber, extractSeasonNumberFromAnimeTitle } from "../utils/common-util.js";
+import { isNonChinese } from "../utils/zh-util.js";
 import { searchBangumiData } from '../utils/bangumi-data-util.js';
 
 const tencentSource = new TencentSource();
@@ -165,7 +166,10 @@ export default class DandanSource extends BaseSource {
       const originalResult = await originalSearchPromise;
       if (originalResult.success) {
         const resolvedSeason = getExplicitSeasonNumber(keyword);
-        const preFiltered = originalResult.data.filter(anime => {
+        // 外文检索词（罗马字/英文等）与中文标题无字符交集，包含与相似度匹配必然失败，
+        // 会误杀 dandan 官方搜索的正确命中（如 "Sayonara Lara" → "再见，拉拉"，animeId 已正确返回）。
+        // 此时跳过预过滤，交由 handleAnimes 用详情接口的别名池（含罗马字标题）做最终判定。
+        const preFiltered = isNonChinese(keyword) ? originalResult.data : originalResult.data.filter(anime => {
           if (anime.isTmdbSource) return true;
           const t = anime.animeTitle || anime.title || '';
           return titleMatches(t, keyword, resolvedSeason, true, 0.8);
@@ -185,11 +189,22 @@ export default class DandanSource extends BaseSource {
       // 原始搜索无结果，对TMDB日语原名结果做最终预过滤
       if (tmdbResult.success) {
         const resolvedSeason = getExplicitSeasonNumber(keyword);
-        const tmdbFiltered = tmdbResult.data.filter(anime => {
-          const t = anime.animeTitle || anime.title || '';
-          return titleMatches(t, keyword, resolvedSeason, true, 0.19);
-        });
-        if (tmdbFiltered.length > 0) return tmdbFiltered;
+        if (isNonChinese(keyword)) {
+          // 外文检索词与 TMDB episodes 返回的中文标题无字符交集，titleMatches 会全灭整批结果（同 original 路径根因）。
+          // 剥离 isTmdbSource 免检标记与 _tmdbCnAlias，使 handleAnimes 走常规 allTitles 匹配：
+          // 用详情接口的别名池（含罗马字/英文别名）做最终判定，别名池不含检索词的无关条目（同字异作）会被自然过滤。
+          const relaxed = tmdbResult.data.map(({ isTmdbSource, _tmdbCnAlias, ...rest }) => rest);
+          if (relaxed.length > 0) {
+            log("info", `[dandan] 外文检索词跳过TMDB结果预过滤，剥离免检标记后交由别名池匹配 (${relaxed.length} 条)`);
+            return relaxed;
+          }
+        } else {
+          const tmdbFiltered = tmdbResult.data.filter(anime => {
+            const t = anime.animeTitle || anime.title || '';
+            return titleMatches(t, keyword, resolvedSeason, true, 0.19);
+          });
+          if (tmdbFiltered.length > 0) return tmdbFiltered;
+        }
       }
 
       log("info", `[dandan] 原始搜索和基于TMDB的搜索均未返回任何结果 (当前搜索词: ${keyword})`);
